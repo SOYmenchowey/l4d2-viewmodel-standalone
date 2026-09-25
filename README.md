@@ -41,17 +41,21 @@ cuadra. No toca el juego ni inyecta nada.
 
 ## Offsets del juego
 
-**Este repo no incluye offsets de memoria del juego.** Las constantes
-específicas de cada build del juego vienen a `0` y están marcadas en el
-código:
+Los offsets de memoria van incluidos en el código y son **específicos de una
+build concreta** de Left 4 Dead 2:
 
-- `viewmodel_hook.cpp` — `CALLER_RVA` y `PROLOGO` (ubicación y firma de la
-  función objetivo). Con valores en 0, `vmh::Instalar()` falla la comprobación
-  de firma y la DLL no parchea nada (comportamiento seguro por defecto).
-- `dx9_hook.cpp` — offsets de `engine.dll` usados para el congelado de cámara.
-  Con 0, esa función se omite.
+- `viewmodel_hook.cpp` — `CALLER_RVA` (ubicación del hook en `client.dll`) y
+  `PROLOGO` (firma de la función objetivo).
+- `dx9_hook.cpp` — `OFF_ENGINE_PTR` y `OFF_ANGULOS` (congelado de cámara en
+  `engine.dll`).
 
-Rellénalos bajo tu propia responsabilidad para tu versión del juego.
+Si Steam actualiza el juego y los offsets dejan de coincidir, la comprobación
+de firma hace que `vmh::Instalar()` devuelva `false` sin parchear nada y el
+congelado de cámara se omite: la DLL queda inerte en lugar de provocar un
+crash. Para adaptarla a otra build, actualiza esos valores en los dos archivos
+indicados.
+
+Usa estos offsets bajo tu propia responsabilidad.
 
 ## Uso
 

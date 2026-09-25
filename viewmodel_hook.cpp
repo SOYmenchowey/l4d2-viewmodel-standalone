@@ -13,8 +13,9 @@ namespace vmh {
 namespace {
 
     // RVA del caller de CalcViewModelView dentro de client.dll.
-    // NO incluida en este repo: rellénala para tu build del juego (queda a 0 = instalación aborta con seguridad).
-    const DWORD CALLER_RVA = 0x00000000;
+    // Específico de la build del juego (ver README: si el juego se actualiza, la
+    // comprobación de firma hace fallar Instalar() sin parchear nada).
+    const DWORD CALLER_RVA = 0x1EFE0;
     const DWORD VUELTA_OFF = 0x7;
     const DWORD COPY_OFF = 0x320;
     const DWORD TAMANO_HOOK = 5;
@@ -121,15 +122,15 @@ namespace {
         return code;
     }
 
-    // Firma (prologo) de la función objetivo. NO incluida en este repo: a 0
-    // la comprobación memcmp falla y Instalar() devuelve false sin parchear nada.
-    const BYTE PROLOGO[7] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    // Firma (prologo) de la función objetivo: si el juego se actualiza y cambia,
+    // el memcmp falla y Instalar() devuelve false sin parchear nada.
+    const BYTE PROLOGO[7] = { 0x55, 0x8B, 0xEC, 0x53, 0x8B, 0x5D, 0x0C };
 }
 
 namespace vmh {
 
     bool Instalar() {
-        if (CALLER_RVA == 0) return false;  // offset no incluido en este repo: no parchear nada
+        if (CALLER_RVA == 0) return false;  // safety: sin offset, no parchear nada
         HMODULE client = GetModuleHandleA("client.dll");
         if (!client) return false;
         g_caller = (DWORD)client + CALLER_RVA;

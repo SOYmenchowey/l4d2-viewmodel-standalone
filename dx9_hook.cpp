@@ -123,9 +123,10 @@ namespace {
                 ImGui::GetIO().MouseDrawCursor = false;
             }
             // FIX cámara engine: congelar viewangles en memoria cuando menú visible (respaldo si WM_INPUT se escapa)
-            // engine.dll -> ptr -> +offset pitch/yaw. Offsets NO incluidos en este repo (a 0 = se omite el freeze).
-            const DWORD OFF_ENGINE_PTR = 0x00000000;
-            const DWORD OFF_ANGULOS = 0x00000000;
+            // engine.dll -> puntero -> +pitch/yaw. Específicos de la build del juego;
+            // si se quedan a 0 (o el offset no existe) el freeze se omite.
+            const DWORD OFF_ENGINE_PTR = 0x4268EC;
+            const DWORD OFF_ANGULOS = 0x4AAC;
             if (menu::estaVisible() && !menu::estaEnMenuJuego() && OFF_ENGINE_PTR && OFF_ANGULOS) {
                 HMODULE eng = GetModuleHandleA("engine.dll");
                 if (eng) {
