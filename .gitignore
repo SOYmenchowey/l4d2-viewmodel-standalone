@@ -1,0 +1,15 @@
+# Compilación
+build/
+*.obj
+*.dll
+*.exe
+*.pdb
+*.lib
+
+# Config local generada
+vmconfig.ini
+
+# Respaldos y basura
+_backups/
+*.log
+.vs/
