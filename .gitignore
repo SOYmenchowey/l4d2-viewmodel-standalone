@@ -1,15 +1,23 @@
-# Compilación
+# MSVC / local build output
 build/
 *.obj
 *.dll
 *.exe
 *.pdb
 *.lib
+*.exp
+*.ilk
+*.pch
 
-# Config local generada
+# Local settings and generated logs
 vmconfig.ini
-
-# Respaldos y basura
-_backups/
 *.log
+
+# Local Codex work, backups, and IDE state
+work/
+_backups/
 .vs/
+.idea/
+.vscode/
+*.user
+*.suo

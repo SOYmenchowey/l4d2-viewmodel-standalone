@@ -1,10 +1,11 @@
 #include <windows.h>
 #include <cstdio>
 #include <cstring>
-#include "viewmodel_hook.h"
-#include "dx9_hook.h"
+#include "viewmodel/viewmodel_hook.h"
+#include "overlay/dx9_hook.h"
 
 namespace {
+    HANDLE g_instanceMutex = nullptr;
     FILE* AbrirLog(){
         char ruta[MAX_PATH];
         DWORD n=GetTempPathA(MAX_PATH,ruta);
@@ -29,12 +30,18 @@ namespace {
         return found;
     }
     void Setup(){
-        // Anti doble inyección: mutex global
-        HANDLE mtx = CreateMutexA(nullptr, FALSE, "l4d2_viewmodel_standalone_mtx");
-        if(GetLastError()==ERROR_ALREADY_EXISTS){
+        // Una instancia por proceso; conservar el handle mientras la DLL resida.
+        char nombre[96];
+        sprintf_s(nombre, "Local\\l4d2_viewmodel_standalone_%lu", GetCurrentProcessId());
+        HANDLE mtx = CreateMutexA(nullptr, FALSE, nombre);
+        DWORD error = GetLastError();
+        if(!mtx){ Log("[setup] no se pudo crear mutex"); return; }
+        if(error==ERROR_ALREADY_EXISTS){
             Log("[setup] otra instancia del standalone ya corre");
-            // Permite continuar pero avisa; el hook fallará si ya está parcheado
+            CloseHandle(mtx);
+            return;
         }
+        g_instanceMutex = mtx;
         for(int i=0;i<300 && !GetModuleHandleA("client.dll"); ++i) Sleep(100);
         for(int i=0;i<300 && !GetModuleHandleA("d3d9.dll"); ++i) Sleep(100);
         if(!vmh::Instalar()){
@@ -53,17 +60,17 @@ namespace {
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved){
-    if(reason==DLL_PROCESS_ATTACH || reason==DLL_PROCESS_DETACH){
-        FILE* f=AbrirLog();
-        if(f){ fprintf(f,"DllMain reason=%u h=%p\n", (unsigned)reason, hModule); fclose(f); }
-    }
     if(reason==DLL_PROCESS_ATTACH){
+        // Los callbacks y la cave pueden seguir en ejecucion tras FreeLibrary.
+        // Fijar la DLL antes de iniciar Setup evita tambien descargar su hilo.
+        HMODULE residente = nullptr;
+        if(!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                              (LPCSTR)hModule, &residente)) return FALSE;
         DisableThreadLibraryCalls(hModule);
         HANDLE t=CreateThread(nullptr,0,[](LPVOID)->DWORD{ Setup(); return 0; }, nullptr,0,nullptr);
         if(t) CloseHandle(t);
-    } else if(reason==DLL_PROCESS_DETACH && lpReserved==nullptr){
-        vmh::Desinstalar();
-        dx9h::Desinstalar();
     }
+    // Sin esperas, destruccion de ImGui ni parches dentro del loader lock.
+    // Windows recupera los recursos al terminar el proceso.
     return TRUE;
 }

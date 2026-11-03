@@ -8,6 +8,7 @@ namespace vmh {
     volatile float g_offx = 0.0f;
     volatile float g_offy = 0.0f;
     volatile float g_offz = 0.0f;
+    volatile float g_factor = 1.0f;
 }
 
 namespace {
@@ -29,6 +30,13 @@ namespace {
     DWORD g_caller = 0;
     BYTE g_orig[TAMANO_HOOK];
     DWORD g_cave = 0;
+    bool g_instalado = false;
+    BYTE g_patch[TAMANO_HOOK];
+
+    bool LeerBytes(DWORD direccion, void* destino, size_t longitud) {
+        __try { memcpy(destino, (void*)direccion, longitud); return true; }
+        __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+    }
 
     std::vector<unsigned char> code;
 
@@ -111,6 +119,7 @@ namespace {
             fld_m32((DWORD)&vmh::g_offx); fmul_m32(fwd);
             fld_m32((DWORD)&vmh::g_offy); fmul_m32(rgt); faddp();
             fld_m32((DWORD)&vmh::g_offz); fmul_m32(up); faddp();
+            fmul_m32((DWORD)&vmh::g_factor);
             fadd_esi(i * 4);
             fstp_esi(i * 4);
         }
@@ -130,43 +139,67 @@ namespace {
 namespace vmh {
 
     bool Instalar() {
+        if (g_instalado) return true;
+        // Una cave publicada puede estar en uso; no reutilizarla ni liberarla.
+        if (g_cave) return false;
         if (CALLER_RVA == 0) return false;  // safety: sin offset, no parchear nada
         HMODULE client = GetModuleHandleA("client.dll");
         if (!client) return false;
-        g_caller = (DWORD)client + CALLER_RVA;
+        DWORD caller = (DWORD)client + CALLER_RVA;
         BYTE cur[7];
-        memcpy(cur, (void*)g_caller, 7);
+        if (!LeerBytes(caller, cur, sizeof(cur))) return false;
         if (memcmp(cur, PROLOGO, 7) != 0) return false;
-        memcpy(g_orig, cur, TAMANO_HOOK);
-        if (g_orig[0] == 0xE9) return false;
-        g_cave = (DWORD)VirtualAlloc(NULL, 0x400, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-        if (!g_cave) return false;
-        DWORD scratch = (DWORD)((construir(g_cave, 0, 0, g_caller).size() + 15) & ~15);
-        std::vector<unsigned char> final = construir(g_cave, g_cave + scratch, g_cave + COPY_OFF, g_caller);
-        memset((void*)g_cave, 0, 0x400);
-        memcpy((void*)g_cave, final.data(), final.size());
+        DWORD cave = (DWORD)VirtualAlloc(NULL, 0x400, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+        if (!cave) return false;
+        DWORD scratch = (DWORD)((construir(cave, 0, 0, caller).size() + 15) & ~15);
+        std::vector<unsigned char> final = construir(cave, cave + scratch, cave + COPY_OFF, caller);
+        if (scratch + HB + sizeof(DWORD) > COPY_OFF || COPY_OFF + 12 > 0x400) {
+            VirtualFree((void*)cave, 0, MEM_RELEASE);
+            return false;
+        }
+        memset((void*)cave, 0, 0x400);
+        memcpy((void*)cave, final.data(), final.size());
         float d2r = 0.017453292519943295f;
-        memcpy((void*)(g_cave + scratch + D2R), &d2r, 4);
+        memcpy((void*)(cave + scratch + D2R), &d2r, 4);
+        FlushInstructionCache(GetCurrentProcess(), (void*)cave, final.size());
         DWORD old;
-        VirtualProtect((void*)g_caller, TAMANO_HOOK, PAGE_EXECUTE_READWRITE, &old);
-        *(BYTE*)g_caller = 0xE9;
-        *(DWORD*)(g_caller + 1) = g_cave - g_caller - TAMANO_HOOK;
-        VirtualProtect((void*)g_caller, TAMANO_HOOK, old, &old);
+        if (!VirtualProtect((void*)caller, TAMANO_HOOK, PAGE_EXECUTE_READWRITE, &old)) {
+            VirtualFree((void*)cave, 0, MEM_RELEASE);
+            return false;
+        }
+        // Revalidar tras preparar la cave, sin adoptar parches de otros overlays.
+        if (memcmp((void*)caller, PROLOGO, sizeof(PROLOGO)) != 0) {
+            DWORD ignored;
+            VirtualProtect((void*)caller, TAMANO_HOOK, old, &ignored);
+            VirtualFree((void*)cave, 0, MEM_RELEASE);
+            return false;
+        }
+        memcpy(g_orig, cur, TAMANO_HOOK);
+        g_patch[0] = 0xE9;
+        DWORD relativo = cave - caller - TAMANO_HOOK;
+        memcpy(g_patch + 1, &relativo, sizeof(relativo));
+        memcpy((void*)caller, g_patch, TAMANO_HOOK);
+        FlushInstructionCache(GetCurrentProcess(), (void*)caller, TAMANO_HOOK);
+        DWORD ignored;
+        VirtualProtect((void*)caller, TAMANO_HOOK, old, &ignored);
+        g_caller = caller;
+        g_cave = cave;
+        g_instalado = true;
         return true;
     }
 
     void Desinstalar() {
-        if (!g_caller) return;
-        BYTE actual = *(BYTE*)g_caller;
-        if (actual != 0xE9) { g_caller = 0; return; }
+        if (!g_instalado || !g_caller) return;
+        BYTE actual[TAMANO_HOOK];
+        if (!LeerBytes(g_caller, actual, sizeof(actual)) ||
+            memcmp(actual, g_patch, sizeof(actual)) != 0) return;
         DWORD old;
-        VirtualProtect((void*)g_caller, TAMANO_HOOK, PAGE_EXECUTE_READWRITE, &old);
+        if (!VirtualProtect((void*)g_caller, TAMANO_HOOK, PAGE_EXECUTE_READWRITE, &old)) return;
         memcpy((void*)g_caller, g_orig, TAMANO_HOOK);
+        FlushInstructionCache(GetCurrentProcess(), (void*)g_caller, TAMANO_HOOK);
         VirtualProtect((void*)g_caller, TAMANO_HOOK, old, &old);
         g_caller = 0;
-        if (g_cave) {
-            VirtualFree((void*)g_cave, 0, MEM_RELEASE);
-            g_cave = 0;
-        }
+        g_instalado = false;
+        // Conservar la cave hasta el fin del proceso para llamadas en vuelo.
     }
 }

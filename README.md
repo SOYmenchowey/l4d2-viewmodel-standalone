@@ -1,90 +1,89 @@
-# l4d2-viewmodel-standalone
+# L4D2 Viewmodel + Third Person
 
-DLL en C++ (x86) para Left 4 Dead 2 que ajusta en vivo la vista de las armas
-(viewmodel) sobre los ejes X/Y/Z, con panel ImGui, crosshair personalizable y
-congelado de cámara mientras el menú está abierto.
+DLL x86 en C++ para ajustar el viewmodel de Left 4 Dead 2 y usar una cámara de tercera persona. Incluye un overlay ImGui con controles para el viewmodel, la mira y la cámara.
 
-## Características
+> Proyecto comunitario, sin afiliación con Valve. Los offsets son específicos de una versión del juego y pueden dejar de coincidir después de una actualización.
 
-- Sliders X/Y/Z (-20 a 20) aplicados en vivo sobre el viewmodel
-- Mira fija (crosshair): tipo cruz/X, tamaño 2..40 px, color con selector
-- Panel ImGui con tecla propia (Insert por defecto, reasignable desde el panel)
-- Guardado/carga de preset en `vmconfig.ini` (se genera automáticamente)
-- Congelado de cámara con el menú abierto (con validaciones de sanidad)
-- Soporta reset de Direct3D9 (cambio de resolución / fullscreen)
-- `ESC` cierra el panel y reenvía la tecla al juego
-- Log en `%TEMP%\vm_standalone_log.txt`
+## Funciones
+
+- Ajuste en vivo de los ejes X, Y y Z del viewmodel.
+- Cámara de tercera persona con activación por menú o hotkey y distancia configurable.
+- Mira personalizable: cruz, X, punto o círculo; tamaño, grosor, color fijo o RGB y cambio automático de forma.
+- Overlay Direct3D 9 / ImGui, abierto por defecto con `Insert`.
+- Preset local `vmconfig.ini`, guardado de forma atómica junto a la DLL.
 
 ## Requisitos
 
-- Windows con Visual Studio BuildTools 2022 (MSVC **x86**) + Windows SDK
-- Left 4 Dead 2 (Steam), proceso x86
+- Windows de 32 o 64 bits.
+- Visual Studio 2022 Build Tools o Visual Studio con MSVC C++ x86/x64 y Windows SDK.
+- Left 4 Dead 2 para Windows (proceso x86) para el uso dentro del juego.
 
 ## Compilar
 
-```
+Abre **Developer Command Prompt for VS** (x86) y ejecuta:
+
+```bat
 build.bat
 ```
 
-Genera `build\viewmodel.dll` y lo copia a `.\viewmodel.dll`. Si no existe,
-crea `vmconfig.ini` con valores por defecto.
+El script también intenta localizar MSVC con `vswhere` si `cl.exe` no está en `PATH`. Produce `build\viewmodel_thirdperson.dll` y `viewmodel.dll`; los binarios y objetos están ignorados por Git.
 
-## Pruebas de interfaz
+Para compilar y ejecutar las regresiones aisladas:
 
+```bat
+tests\build_tests.bat
 ```
-tests\build_preview.bat after
-```
-
-Compila el menú real en una ventana oculta con eventos sintéticos y comprueba
-sliders, guardado, captura de tecla, crosshair y panel. Imprime `PASS` si todo
-cuadra. No toca el juego ni inyecta nada.
-
-## Offsets del juego
-
-Los offsets de memoria van incluidos en el código y son **específicos de una
-build concreta** de Left 4 Dead 2:
-
-- `viewmodel_hook.cpp` — `CALLER_RVA` (ubicación del hook en `client.dll`) y
-  `PROLOGO` (firma de la función objetivo).
-- `dx9_hook.cpp` — `OFF_ENGINE_PTR` y `OFF_ANGULOS` (congelado de cámara en
-  `engine.dll`).
-
-Si Steam actualiza el juego y los offsets dejan de coincidir, la comprobación
-de firma hace que `vmh::Instalar()` devuelva `false` sin parchear nada y el
-congelado de cámara se omite: la DLL queda inerte en lugar de provocar un
-crash. Para adaptarla a otra build, actualiza esos valores en los dos archivos
-indicados.
-
-Usa estos offsets bajo tu propia responsabilidad.
 
 ## Uso
 
-1. Compilar y obtener `viewmodel.dll`.
-2. Inyectarla en el proceso de Left 4 Dead 2 (x86) con la herramienta que
-   prefieras.
-3. En partida, pulsa `Insert` (tecla por defecto) para abrir o cerrar el panel.
+1. Compila el proyecto.
+2. Inicia Left 4 Dead 2 de 32 bits.
+3. Inyecta `build\viewmodel_thirdperson.dll` con un inyector compatible.
+4. Pulsa `Insert` para abrir el panel. Las teclas de menú, viewmodel y tercera persona se pueden reasignar desde el overlay.
+5. Usa **Guardar** para conservar los ajustes. La DLL también carga el `vmconfig.ini` que esté junto a ella; `vmconfig.example.ini` es una plantilla limpia.
+
+Este proyecto no incluye inyector ni binario precompilado. La carga de la DLL puede no estar permitida por servidores o políticas del juego; úsala bajo tu responsabilidad y de acuerdo con las reglas aplicables.
+
+## Cómo funciona
+
+- `src/core/dllmain.cpp` inicia el componente de forma diferida y evita inicializaciones duplicadas.
+- `src/viewmodel/viewmodel_hook.cpp` instala con MinHook el hook del viewmodel después de comprobar la firma esperada del código.
+- `src/thirdperson/thirdperson.cpp` localiza `z_view_distance`, confirma el nombre de la ConVar y actualiza sus valores para activar o desactivar la tercera persona.
+- `src/thirdperson/camera_transition.h` verifica firmas de la rutina de cámara y sincroniza la distancia interpolada solo cuando el objetivo del juego coincide con el ajuste solicitado.
+- `src/overlay/dx9_hook.cpp` dibuja el panel desde `Present`, maneja `Reset` de Direct3D 9 y reenvía la entrada del juego cuando corresponde.
+- `src/overlay/menu.cpp` y `src/overlay/native_pages.inl` contienen las páginas y hotkeys del overlay. La configuración se escribe en un archivo temporal y se reemplaza de forma atómica.
+
+## Offsets y compatibilidad
+
+Los valores están incluidos intencionalmente para facilitar la revisión y actualización comunitaria. Son RVA/offsets de 32 bits, relativos a `client.dll` o `engine.dll` según se indica; no son direcciones absolutas válidas para todas las instalaciones.
+
+| Archivo | Módulo | Valor | Uso |
+| --- | --- | --- | --- |
+| `src/viewmodel/viewmodel_hook.cpp` | `client.dll` | `CALLER_RVA = 0x1EFE0` | Sitio de llamada del hook; además valida el prólogo `55 8B EC 53 8B 5D 0C`. |
+| `src/thirdperson/thirdperson.cpp` | `client.dll` | `RVA_Z_VIEW_DISTANCE = 0x7C1588` | ConVar `z_view_distance`; campos de nombre `+0x0C`, float `+0x2C`, entero `+0x30`. |
+| `src/thirdperson/camera_transition.h` | `client.dll` | `0x726BD8`, `0x634FB`, `0x26B3F0`, `0x256908`, `0x7C15A4`, `0x2630` | Referencia al jugador local, rutinas/firmas de cámara, ConVar padre y distancia interpolada del jugador. |
+| `src/overlay/dx9_hook.cpp` | `engine.dll` | `0x4268EC`, `+0x4AAC` | Referencia y ángulos del jugador usados para mantener la vista mientras el overlay está abierto. |
+
+Las comprobaciones de firma y nombre hacen que varias rutas se omitan cuando no reconocen el binario esperado, pero no garantizan compatibilidad con todas las versiones. Tras una actualización de Steam, vuelve a validar los offsets antes de usar la DLL. No hay una identificación de build del juego asociada a estos valores en este repositorio.
+
+## Configuración local
+
+La configuración real `vmconfig.ini` se mantiene fuera del repositorio para no publicar preferencias del usuario. Puedes copiar `vmconfig.example.ini` y guardarlo junto a la DLL; el programa también crea valores iniciales si no existe.
+
+Claves principales: `vmOffx`, `vmOffy`, `vmOffz`, `vmActivado`, `vmTecla`, `hotkey`, `crosshair*`, `tpActivado`, `tpDistancia` y `tpTecla`.
 
 ## Estructura
 
-- `dllmain.cpp` — arranque, mutex anti-doble-inyección, log
-- `viewmodel_hook.*` — cave de hook del viewmodel
-- `dx9_hook.*` — hook de Direct3D9, ImGui, input y ESC
-- `menu.*` — panel (sliders, crosshair, hotkey, preset)
-- `imgui/` — Dear ImGui + fuentes (Inter, iconos Font Awesome)
-- `tests/` — prueba aislada de la interfaz
+```text
+src/          código de la DLL y del overlay
+third_party/  Dear ImGui, MinHook y avisos de licencias
+tests/        regresiones aisladas de hooks, cámara, overlay y configuración
+build.bat     compilación x86 con MSVC
+```
 
-## Créditos y licencias de fuentes
+## Créditos y licencias
 
-- [Dear ImGui](https://github.com/ocornut/imgui) — MIT, ver `imgui/LICENSE.txt`
-- [Inter](https://github.com/rsms/inter/) (Rasmus Andersson) — SIL OFL 1.1,
-  incrustada en `imgui/inter_font.h`
-- [Font Awesome Free](https://fontawesome.com/) — glifos de fuente
-  incrustados en `imgui/fa_icons.h`, SIL OFL 1.1
-
-Avisos de copyright y texto completo de la SIL Open Font License 1.1 para
-ambas fuentes: [`imgui/OFL-1.1.txt`](imgui/OFL-1.1.txt).
-
-## Licencia
-
-MIT — ver [LICENSE.txt](LICENSE.txt) (el código de este proyecto). Las
-fuentes anteriores conservan su propia licencia (OFL 1.1).
+- Este proyecto: MIT, ver [LICENSE.txt](LICENSE.txt).
+- Dear ImGui: MIT, ver `third_party/imgui/LICENSE.txt`.
+- MinHook: BSD 2-Clause, ver `third_party/minhook/LICENSE.txt`.
+- Fuentes Inter y glifos Font Awesome incluidos: SIL Open Font License 1.1, ver `third_party/imgui/OFL-1.1.txt`.

@@ -1,9 +1,13 @@
 #include "dx9_hook.h"
 #include "menu.h"
+#include "thirdperson/thirdperson.h"
 #include <windows.h>
 #include <cstdio>
 #include <cstring>
 #include <vector>
+#include <atomic>
+#include <cstdint>
+#include <cmath>
 #include <d3d9.h>
 #include "imgui.h"
 #include "imgui_impl_win32.h"
@@ -19,8 +23,7 @@ namespace {
     HWND      g_hwnd = nullptr;
     WNDPROC   g_origWndProc = nullptr;
     bool      g_imguiInit = false;
-    volatile bool g_setupListo = false;
-    volatile bool g_cerrando = false;
+    std::atomic<bool> g_setupListo{false};
     DWORD g_parchadas[64][2];
     int   g_numParchadas = 0;
     static HWND g_hooked[32];
@@ -45,9 +48,9 @@ namespace {
                         prot == PAGE_EXECUTE_READ || prot == PAGE_EXECUTE_READWRITE ||
                         prot == PAGE_EXECUTE_WRITECOPY);
         if (!legible) return false;
-        const BYTE* base = (const BYTE*)mbi.BaseAddress;
-        const BYTE* ini = (const BYTE*)p;
-        return ini >= base && (ini + bytes) <= (base + mbi.RegionSize);
+        const uintptr_t base=reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+        const uintptr_t start=reinterpret_cast<uintptr_t>(p);
+        return start>=base && start-base<mbi.RegionSize && bytes<=mbi.RegionSize-(start-base);
     }
 
     static WNDPROC OrigForHwnd(HWND h){
@@ -55,14 +58,11 @@ namespace {
         return g_origWndProc ? g_origWndProc : (WNDPROC)DefWindowProcW;
     }
     LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-        if (g_cerrando) {
-            WNDPROC o = OrigForHwnd(hWnd);
-            return CallWindowProc(o, hWnd, msg, wParam, lParam);
-        }
+        if(!g_setupListo) return CallWindowProc(OrigForHwnd(hWnd),hWnd,msg,wParam,lParam);
         if (msg == WM_KILLFOCUS || (msg == WM_ACTIVATEAPP && wParam == FALSE))
             menu::PerderFoco();
 
-        if (menu::estaVisible()) {
+        if (menu::estaVisible() && menu::tieneFoco()) {
             if (msg == WM_INPUT) {
                 if (!menu::estaEnMenuJuego()) {
                     UINT size = 0;
@@ -80,6 +80,7 @@ namespace {
                 return 0;
             }
             if (msg == WM_KEYDOWN && wParam == VK_ESCAPE) {
+                if (menu::CancelarCaptura()) return 0;
                 menu::Cerrar();
                 WNDPROC o = OrigForHwnd(hWnd);
                 return CallWindowProc(o, hWnd, msg, wParam, lParam);
@@ -111,7 +112,8 @@ namespace {
     static bool g_freezeActive=false;
     static float g_savedPitch=0, g_savedYaw=0;
     HRESULT WINAPI Present(IDirect3DDevice9* dev, const RECT* a, const RECT* b, HWND c, const RGNDATA* d) {
-        if (g_setupListo && !g_cerrando) {
+        if (g_setupListo) {
+            if (!menu::tieneFoco() && menu::estaVisible()) menu::PerderFoco();
             if (!g_imguiInit) {
                 ImGui_ImplDX9_Init(dev);
                 g_imguiInit = true;
@@ -160,10 +162,15 @@ namespace {
             ImGui_ImplWin32_NewFrame();
             if (menu::estaVisible() && !menu::estaEnMenuJuego()) {
                 ImVec2 display = ImGui::GetIO().DisplaySize;
-                if (dx9h::g_mouseX < 0.0f) {
-                    dx9h::g_mouseX = display.x * 0.5f;
-                    dx9h::g_mouseY = display.y * 0.5f;
+                static bool cursorInitialized=false;
+                if (!cursorInitialized || !std::isfinite(dx9h::g_mouseX) || !std::isfinite(dx9h::g_mouseY)) {
+                    cursorInitialized=true;
+                    if(dx9h::g_mouseX<0 || !std::isfinite(dx9h::g_mouseX))
+                        dx9h::g_mouseX = display.x * 0.5f;
+                    if(dx9h::g_mouseY<0 || !std::isfinite(dx9h::g_mouseY))
+                        dx9h::g_mouseY = display.y * 0.5f;
                 }
+                if (dx9h::g_mouseX < 0.0f) dx9h::g_mouseX = 0.0f;
                 if (dx9h::g_mouseY < 0.0f) dx9h::g_mouseY = 0.0f;
                 if (dx9h::g_mouseX > display.x) dx9h::g_mouseX = display.x;
                 if (dx9h::g_mouseY > display.y) dx9h::g_mouseY = display.y;
@@ -171,6 +178,7 @@ namespace {
             }
             ImGui::NewFrame();
             menu::Dibujar();
+            tp::Aplicar();
             ImGui::EndFrame();
             ImGui::Render();
             ImGui_ImplDX9_RenderDrawData(ImGui::GetDrawData());
@@ -179,6 +187,7 @@ namespace {
     }
 
     HRESULT WINAPI Reset(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS* pp) {
+        if(!g_setupListo) return g_origReset(dev,pp);
         if (g_imguiInit) ImGui_ImplDX9_InvalidateDeviceObjects();
         HRESULT hr = g_origReset(dev, pp);
         if (SUCCEEDED(hr) && g_imguiInit) ImGui_ImplDX9_CreateDeviceObjects();
@@ -190,17 +199,41 @@ namespace dx9h {
     float g_mouseX = -1.0f;
     float g_mouseY = -1.0f;
 
-    void ParchearSlot(DWORD* slot, DWORD nuevo) {
-        DWORD old;
-        VirtualProtect(slot, sizeof(DWORD), PAGE_READWRITE, &old);
-        DWORD original = *slot;
-        *slot = nuevo;
-        VirtualProtect(slot, sizeof(DWORD), old, &old);
-        if (g_numParchadas < 64) {
+    bool ParchearSlot(DWORD* slot, DWORD nuevo, DWORD esperado=0) {
+        if(!slot || !nuevo || (reinterpret_cast<uintptr_t>(slot)&3) || !RegionLegible(slot,sizeof(DWORD))) return false;
+        DWORD old=0,original=0; bool changed=false;
+        if(!VirtualProtect(slot,sizeof(DWORD),PAGE_READWRITE,&old)) return false;
+        __try {
+            original=esperado ? esperado : *slot;
+            changed=static_cast<DWORD>(InterlockedCompareExchange(reinterpret_cast<volatile LONG*>(slot),
+                static_cast<LONG>(nuevo),static_cast<LONG>(original)))==original;
+        } __except(EXCEPTION_EXECUTE_HANDLER) { changed=false; }
+        DWORD ignored=0;
+        if(!VirtualProtect(slot,sizeof(DWORD),old,&ignored)) Log("[dx9] no se pudo restaurar la proteccion del slot");
+        if (changed && g_numParchadas < 64) {
             g_parchadas[g_numParchadas][0] = (DWORD)slot;
             g_parchadas[g_numParchadas][1] = original;
             g_numParchadas++;
         }
+        return changed;
+    }
+
+    static int EscanearRegion(void* base,size_t size,DWORD endScene) {
+        if(size<43*sizeof(DWORD)) return 0;
+        int patched=0;
+        // VirtualQuery is only a snapshot: another thread can unmap this region.
+        __try {
+            const size_t last=size-43*sizeof(DWORD);
+            for(size_t offset=0;offset<=last;offset+=sizeof(DWORD)) {
+                auto* table=reinterpret_cast<DWORD*>(static_cast<BYTE*>(base)+offset);
+                if(table[16]==reinterpret_cast<DWORD>(g_origReset) && table[17]==reinterpret_cast<DWORD>(g_origPresent) && table[42]==endScene) {
+                    if(!ParchearSlot(&table[16],reinterpret_cast<DWORD>(&Reset),reinterpret_cast<DWORD>(g_origReset))) continue;
+                    if(ParchearSlot(&table[17],reinterpret_cast<DWORD>(&Present),reinterpret_cast<DWORD>(g_origPresent))) ++patched;
+                    else ParchearSlot(&table[16],reinterpret_cast<DWORD>(g_origReset),reinterpret_cast<DWORD>(&Reset));
+                }
+            }
+        } __except(EXCEPTION_EXECUTE_HANDLER) { /* Keep other regions usable. */ }
+        return patched;
     }
 
     static BOOL CALLBACK EnumChildHook(HWND h, LPARAM lp){
@@ -218,8 +251,8 @@ namespace dx9h {
     }
     static BOOL CALLBACK EnumHookWindows(HWND h, LPARAM lp){
         if(g_hookedCount>=32) return FALSE;
-        DWORD pid=0; GetWindowThreadProcessId(h,&pid);
-        if(pid!=GetCurrentProcessId()) return TRUE;
+        DWORD pid=0; const DWORD thread=GetWindowThreadProcessId(h,&pid);
+        if(pid!=GetCurrentProcessId() || thread!=GetWindowThreadProcessId(g_hwnd,nullptr)) return TRUE;
         if(h==g_hwnd) return TRUE; // ya hookeada principal, evitar doble hook
         char title[256]={0}; GetWindowTextA(h,title,sizeof(title));
         char cls[128]={0}; GetClassNameA(h,cls,sizeof(cls));
@@ -239,18 +272,6 @@ namespace dx9h {
         if (!g_hwnd) { Log("[dx9] sin hwnd"); return false; }
         HMODULE d3d9mod = GetModuleHandleA("d3d9.dll");
         if (!d3d9mod) { Log("[dx9] no d3d9.dll"); return false; }
-        // Hookear ventana principal + todas las visibles del proceso (fix cámara)
-        g_origWndProc = (WNDPROC)SetWindowLongPtrW(g_hwnd, GWLP_WNDPROC, (LONG_PTR)WndProc);
-        g_hooked[0]=g_hwnd; g_hookedOrig[0]=g_origWndProc; g_hookedCount=1;
-        char lg[128]; sprintf_s(lg, "[dx9] WndProc principal hwnd=0x%p orig=0x%p", g_hwnd, g_origWndProc); Log(lg);
-        EnumWindows(EnumHookWindows, 0);
-        ImGui::CreateContext();
-        ImGui::GetIO().IniFilename = nullptr;
-        ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
-        ImGui_ImplWin32_Init(g_hwnd);
-        menu::Inicializar(g_hwnd);
-        Log("[dx9] ImGui base iniciado");
-
         typedef IDirect3D9* (WINAPI* Create9_t)(UINT);
         Create9_t Create9 = (Create9_t)GetProcAddress(d3d9mod, "Direct3DCreate9");
         if (!Create9) { Log("[dx9] no Direct3DCreate9"); return false; }
@@ -302,50 +323,36 @@ namespace dx9h {
         Log("[dx9] Present/Reset obtenidos");
         int parcheadas = 0;
         MEMORY_BASIC_INFORMATION mbi;
-        for (BYTE* addr = nullptr; VirtualQuery(addr, &mbi, sizeof(mbi)); addr = (BYTE*)mbi.BaseAddress + mbi.RegionSize) {
+        for (uintptr_t address=0;VirtualQuery(reinterpret_cast<void*>(address),&mbi,sizeof(mbi));) {
+            const uintptr_t base=reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+            if(!mbi.RegionSize || mbi.RegionSize>UINTPTR_MAX-base || base+mbi.RegionSize<=address) break;
+            address=base+mbi.RegionSize;
             if (mbi.State != MEM_COMMIT) continue;
             if (mbi.Protect == PAGE_NOACCESS || (mbi.Protect & PAGE_GUARD)) continue;
             if (mbi.Protect & (PAGE_NOCACHE | PAGE_WRITECOMBINE)) continue;
             if (!(mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY))) continue;
             if (mbi.Type != MEM_IMAGE && mbi.RegionSize > 0x1000000) continue;
-            for (DWORD p = (DWORD)mbi.BaseAddress; p + 4 * 43 <= (DWORD)mbi.BaseAddress + mbi.RegionSize; p += 4) {
-                DWORD* table = (DWORD*)p;
-                if (table[16] == (DWORD)g_origReset && table[17] == (DWORD)g_origPresent && table[42] == origEndScene) {
-                    ParchearSlot(&table[17], (DWORD)&Present);
-                    ParchearSlot(&table[16], (DWORD)&Reset);
-                    parcheadas++;
-                }
-            }
+            parcheadas+=EscanearRegion(mbi.BaseAddress,mbi.RegionSize,origEndScene);
         }
         char buf[128];
         sprintf_s(buf, "[dx9] vtables verificadas: %d", parcheadas);
         Log(buf);
+        if(!parcheadas) { Log("[dx9] no se instalaron callbacks; overlay desactivado"); return false; }
+        if(!ImGui::CreateContext()) return false;
+        ImGui::GetIO().IniFilename=nullptr;
+        ImGui::GetIO().ConfigFlags|=ImGuiConfigFlags_NoMouseCursorChange;
+        if(!ImGui_ImplWin32_Init(g_hwnd)) { ImGui::DestroyContext(); return false; }
+        // Install input only after rendering is available; failed setup cannot
+        // swallow the game's input. Ignore unrelated windows on other threads.
+        g_origWndProc=reinterpret_cast<WNDPROC>(SetWindowLongPtrW(g_hwnd,GWLP_WNDPROC,reinterpret_cast<LONG_PTR>(WndProc)));
+        if(!g_origWndProc) { ImGui_ImplWin32_Shutdown(); ImGui::DestroyContext(); return false; }
+        g_hooked[0]=g_hwnd;g_hookedOrig[0]=g_origWndProc;g_hookedCount=1;
+        EnumChildWindows(g_hwnd,EnumChildHook,0);
+        EnumWindows(EnumHookWindows,0);
+        menu::Inicializar(g_hwnd);
+        Log("[dx9] ImGui base iniciado");
         g_setupListo = true;
         return true;
     }
 
-    void Desinstalar() {
-        g_setupListo = false;
-        g_cerrando = true;
-        Sleep(80);
-        menu::Apagar();
-        for (int i = 0; i < g_numParchadas; i++) {
-            DWORD old;
-            VirtualProtect((void*)g_parchadas[i][0], sizeof(DWORD), PAGE_READWRITE, &old);
-            *(DWORD*)g_parchadas[i][0] = g_parchadas[i][1];
-            VirtualProtect((void*)g_parchadas[i][0], sizeof(DWORD), old, &old);
-        }
-        g_numParchadas = 0;
-        for(int i=0;i<g_hookedCount;i++){
-            if(g_hooked[i] && g_hookedOrig[i]) SetWindowLongPtrW(g_hooked[i], GWLP_WNDPROC, (LONG_PTR)g_hookedOrig[i]);
-        }
-        g_hookedCount=0;
-        if (g_hwnd && g_origWndProc) SetWindowLongPtrW(g_hwnd, GWLP_WNDPROC, (LONG_PTR)g_origWndProc);
-        if (g_imguiInit) {
-            ImGui_ImplDX9_Shutdown();
-            ImGui_ImplWin32_Shutdown();
-            ImGui::DestroyContext();
-            g_imguiInit = false;
-        }
-    }
 }
